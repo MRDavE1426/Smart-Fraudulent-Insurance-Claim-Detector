@@ -391,9 +391,13 @@ def hash_password(password, salt=None):
     return digest, salt
 
 
+@st.cache_resource
 def init_db():
     """Creates tables on first run, seeds the default admin, and migrates
-    any pre-existing customer_claims.csv data into SQLite exactly once."""
+    any pre-existing customer_claims.csv data into SQLite exactly once.
+    Cached with st.cache_resource so it only runs once per app process —
+    avoids a race where two concurrent sessions both try to seed the
+    default admin at the same time and collide on the PRIMARY KEY."""
     conn = get_conn()
     cur = conn.cursor()
 
@@ -427,16 +431,15 @@ def init_db():
     """)
     conn.commit()
 
-    # Seed the default admin only if the admins table is empty, so an
-    # operator's env-var credentials aren't clobbered on every restart.
-    cur.execute("SELECT COUNT(*) AS c FROM admins")
-    if cur.fetchone()["c"] == 0:
-        digest, salt = hash_password(DEFAULT_ADMIN_PASSWORD)
-        cur.execute(
-            "INSERT INTO admins (Username, PasswordHash, Salt) VALUES (?, ?, ?)",
-            (DEFAULT_ADMIN_USERNAME, digest, salt),
-        )
-        conn.commit()
+    # Seed the default admin only if it doesn't already exist. INSERT OR
+    # IGNORE makes this safe even if two processes race here — whichever
+    # insert loses just gets silently ignored instead of raising.
+    digest, salt = hash_password(DEFAULT_ADMIN_PASSWORD)
+    cur.execute(
+        "INSERT OR IGNORE INTO admins (Username, PasswordHash, Salt) VALUES (?, ?, ?)",
+        (DEFAULT_ADMIN_USERNAME, digest, salt),
+    )
+    conn.commit()
 
     # One-time migration: if the DB has no complaints yet but an old
     # customer_claims.csv exists on disk, import it so nothing is lost.
